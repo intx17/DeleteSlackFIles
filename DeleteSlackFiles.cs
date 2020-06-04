@@ -28,6 +28,13 @@ namespace DeleteSlackFiles.Function
             ILogger log)
         {
             logger = log;
+            var slackResponse = new SlackResponse
+            {
+                text = $"",
+                icon_emoji = ":yami:",
+                username = "ファイル削除bot",
+                link_names = "1"
+            };
 
             string bodyContent = await new StreamReader(req.Body).ReadToEndAsync();
             var values = System.Web.HttpUtility.ParseQueryString(bodyContent);
@@ -37,30 +44,28 @@ namespace DeleteSlackFiles.Function
 
             if (slackRequest.text.Contains("--help") || slackRequest.text.Contains("-h")) return HelpActionResult();
 
-            var listResponse = await ExecuteGetFileListRequestAsync(slackRequest);
-            if (listResponse.files.Count == 0) {
-                var slackResponse = new SlackResponse
-                {
-                    text = $"削除対象のファイルが0件です",
-                    icon_emoji = ":yami:",
-                    username = "ファイル削除bot",
-                    link_names = "1"
-                };
-                
+            // list request
+            var fileListRequest = ToFileListRequst(slackRequest);
+            if (ValidateFileListRequest(fileListRequest) != null)
+            {
+                slackResponse.text = ValidateFileListRequest(fileListRequest);
                 return (ActionResult)new OkObjectResult(JsonConvert.SerializeObject(slackResponse));
             }
 
-            var totalCount = listResponse.paging.total;
+            var listResponse = await ExecuteGetFileListRequestAsync(fileListRequest);
+            if (listResponse.files.Count == 0)
+            {
+                slackResponse.text = $"削除対象のファイルが0件です";
+                return (ActionResult)new OkObjectResult(JsonConvert.SerializeObject(slackResponse));
+            }
+
+
+            // delete request
             var files = listResponse.files;
             var deleteMessage = await ExecuteDeleteFileListRequestAsync(files);
+            slackResponse.text = deleteMessage;
 
-            return (ActionResult)new OkObjectResult(JsonConvert.SerializeObject(new SlackResponse
-            {
-                text = deleteMessage,
-                icon_emoji = ":yami:",
-                username = "ファイル削除bot",
-                link_names = "1"
-            }));
+            return (ActionResult)new OkObjectResult(JsonConvert.SerializeObject(slackResponse));
         }
 
         private static IActionResult HelpActionResult()
@@ -68,10 +73,9 @@ namespace DeleteSlackFiles.Function
             var text = $@"
 ```
 ファイル一括削除
-ex. delete-file -t 2020/01/01 -ac
--t, --to 削除対象ファイルのアップロード日時範囲指定 範囲終了日時  (指定しない場合: 実行日までの全ファイルが削除対象)
--ac, --all-channels 削除対象ファイルのチャンネル指定 (指定しない場合: コマンド実行チャンネルのファイルのみが削除対象)
--au, --all-user 削除対象ファイルをアップロードしたユーザー指定 )指定しない場合: コマンド実行者がアップロードしたファイルのみが削除対象)
+delete-files [START_DATE] [END_DATE] [--all-channels | -ac] [--all-users | -au]
+-ac, --all-channels 全publicチャンネルを削除対象とする
+-au, --all-user 全ユーザーのファイルを削除対象とする
 -h, --help ヘルプ
 ```";
 
@@ -92,34 +96,34 @@ ex. delete-file -t 2020/01/01 -ac
             var replaced = new Regex(pattern).Replace(text, " ");
             return replaced.Split(' ').ToList();
         }
-
-        private static TimeSpan GetTimeStampTo(List<string> textList)
-        {
-            string toArgPrefix;
-            var defaultTimeSpan = DateTime.UtcNow.AddMonths(-1) - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-            if (textList.Contains("--to"))
-            {
-                toArgPrefix = "--to";
-            }
-            else if (textList.Contains("-t")) {
-                toArgPrefix = "-t";
-            }
-            else
-            {
-                return defaultTimeSpan;
-            }
-
-            var dateStrIndex = textList.IndexOf(toArgPrefix) + 1;
-            if (dateStrIndex >= textList.Count) {
-                return defaultTimeSpan;
-            }
-
-            var dateStr = textList[dateStrIndex];
+        
+        private static TimeSpan? ToTimeSpan(string dateStr) {
             logger.LogInformation(dateStr);
             DateTime dateTime;
-            return DateTime.TryParse(dateStr, out dateTime)
-                ? DateTime.Parse(dateStr).ToUniversalTime() - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)
-                : defaultTimeSpan;
+            if (DateTime.TryParse(dateStr, out dateTime)) {
+                return dateTime.ToUniversalTime() - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            }
+            return null;
+        }
+
+         private static TimeSpan? GetTimeStampFrom(List<string> textList)
+        {
+            var fromIndex = 1;
+            if (fromIndex >= textList.Count) {
+                return null;
+            }
+
+            return ToTimeSpan(textList[fromIndex]);
+        }
+
+        private static TimeSpan? GetTimeStampTo(List<string> textList)
+        {
+            var toIndex = 2;
+            if (toIndex >= textList.Count) {
+                return null;
+            }
+
+            return ToTimeSpan(textList[toIndex]);
         }
 
         // 指定なしなら投稿されたチャンネルのみを削除
@@ -138,30 +142,64 @@ ex. delete-file -t 2020/01/01 -ac
                 : userId;
         }
 
-        private static string GetListURI(SlackRequest slackRequest)
+        private static FileListRequest ToFileListRequst(SlackRequest slackRequest)
         {
             var slackRequestTextList = ToSlackRequestTextList(slackRequest.text);
 
+            var timeStampFrom = GetTimeStampFrom(slackRequestTextList);
             var timeStampTo = GetTimeStampTo(slackRequestTextList);
-            var uri = $"https://slack.com/api/files.list?token={token}&ts_to={timeStampTo.TotalSeconds.ToString()}";
-
             var channel = GetTargetChannel(slackRequestTextList, slackRequest.channel_id);
-            if (!string.IsNullOrEmpty(channel)) {
-                uri += $"&channel={channel}";
-                logger.LogInformation(channel);
-            }
             var user = GetTargetUser(slackRequestTextList, slackRequest.user_id);
-            if (!string.IsNullOrEmpty(user)) {
-                uri += $"&user={user}";
-                logger.LogInformation(user);
-            }
-            return uri;
+
+            var request = new FileListRequest
+            {
+                Token = token,
+                From = timeStampFrom,
+                To = timeStampTo,
+                Channel = channel,
+                User = user
+            };
+
+            return request;
         }
 
-        private static async Task<FileListResponse> ExecuteGetFileListRequestAsync(SlackRequest slackRequest) {
-            var fileListRequestURI = GetListURI(slackRequest);
-            logger.LogInformation(fileListRequestURI);
-            var listHttpResponse = await client.GetAsync(fileListRequestURI);
+        // TODO: エラーthrowして返す
+        #nullable enable
+        private static string? ValidateFileListRequest(FileListRequest fileListRequest)
+        {
+            if (fileListRequest.From == null)
+            {
+                return "削除範囲開始日時が指定されていないか、不正です";
+            }
+
+            if (fileListRequest.To == null)
+            {
+                return "削除範囲終了日時が指定されていないか、不正です";
+            }
+
+            if (fileListRequest.From > fileListRequest.To)
+            {
+                return "削除範囲開始日時が終了日時より後になっています。";
+            }
+
+            return null;
+        }
+        #nullable disable
+
+        private static async Task<FileListResponse> ExecuteGetFileListRequestAsync(FileListRequest fileListRequest)
+        {
+            var uri = $"https://slack.com/api/files.list?token={token}&ts_from={fileListRequest.From?.TotalSeconds.ToString()}&ts_to={fileListRequest.To?.TotalSeconds.ToString()}";
+
+            if (!string.IsNullOrEmpty(fileListRequest.Channel)) {
+                logger.LogInformation(fileListRequest.Channel);
+                uri += $"&channel={fileListRequest.Channel}";
+            }
+            if (!string.IsNullOrEmpty(fileListRequest.User)) {
+                logger.LogInformation(fileListRequest.User);
+                uri += $"&user={fileListRequest.User}";
+            }
+            logger.LogInformation(uri);
+            var listHttpResponse = await client.GetAsync(uri);
             logger.LogInformation(await listHttpResponse.Content.ReadAsStringAsync());
             return await listHttpResponse.Content.ReadAsAsync<FileListResponse>();
         }
@@ -238,6 +276,17 @@ ex. delete-file -t 2020/01/01 -ac
             public List<File> files { get; set; }
             public Paging paging { get; set; }
         }
+
+        #nullable enable
+         public class FileListRequest
+        {
+            public string? User { get; set; }
+            public string Token { get; set; } = "";
+            public string? Channel { get; set; }
+            public TimeSpan? From { get; set; }
+            public TimeSpan? To { get; set; }
+        }
+        #nullable disable
 
         public class File
         {
