@@ -66,10 +66,14 @@ namespace DeleteSlackFiles.Function
         private static IActionResult HelpActionResult()
         {
             var text = $@"
-            -t, --to 削除対象ファイルのアップロード日時範囲指定 開始日時
-            -ac, --all-channels 削除対象ファイルのチャンネル指定 指定しないとコマンド実行チャンネルのファイルだけ削除
-            -au, --all-user 削除対象ファイルをアップロードしたユーザー指定 指定しないとコマンド実行者がアップロードしたファイルだけ削除
-            -h, --help ヘルプ";
+```
+ファイル一括削除
+ex. delete-file -t 2020/01/01 -ac
+-t, --to 削除対象ファイルのアップロード日時範囲指定 範囲終了日時  (指定しない場合: 実行日までの全ファイルが削除対象)
+-ac, --all-channels 削除対象ファイルのチャンネル指定 (指定しない場合: コマンド実行チャンネルのファイルのみが削除対象)
+-au, --all-user 削除対象ファイルをアップロードしたユーザー指定 )指定しない場合: コマンド実行者がアップロードしたファイルのみが削除対象)
+-h, --help ヘルプ
+```";
 
             var slackResponse = new SlackResponse
             {
